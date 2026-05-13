@@ -54,7 +54,7 @@ def _normalize_estimate_url(url: str) -> str:
     netloc = parts.netloc.lower()
     path = parts.path.rstrip('/')
 
-    keep_keys = {'shared-estimate', 'service'}
+    keep_keys = {'shared-estimate'}
     q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=False) if k.lower() in keep_keys]
     q_sorted = sorted((k.lower(), (v or '').strip()) for k, v in q)
     query = urlencode(q_sorted, doseq=True)
@@ -122,7 +122,7 @@ if IN_SCOPE_COL not in scan_df.columns:
 # Rows with a scan_status error (Gate 1) are always excluded — they are structurally
 # broken files that never reached content evaluation.
 # Rows with in_scope = FALSE (Gate 2) are also excluded.
-# Only rows that pass both gates participate in comparison and needs-review.
+# Only rows that pass both gates participate in comparison and the action queue tabs.
 scan_ok = scan_df[SCAN_STATUS_COL].astype(str).str.strip().str.lower() == 'ok'
 
 in_scope = scan_ok & (
@@ -143,11 +143,22 @@ criteria_true = (
 scan_df['_scenario_key'] = scan_df[YML_URL_COL].astype(str).map(_normalize_learn_url)
 est_df['_scenario_key'] = est_df[YML_URL_COL].astype(str).map(_normalize_learn_url)
 
-# Build inventory map: one estimate link per scenario
+# Build two lookup structures from the inventory:
+#   inv_map      — Published rows only; used for estimate link comparison
+#   excluded_urls — non-Published rows (e.g. Skip); these are known to the
+#                  inventory but intentionally excluded from the calculator.
+#                  A scanned article whose URL appears here should never be
+#                  surfaced as a new_estimate_candidate.
+PUBLISHED_STATUS = 'Published'
 inv_map = {}
+excluded_urls = set()
 for _, row in est_df.iterrows():
     key = row.get('_scenario_key', '')
     if not key:
+        continue
+    row_status = str(row.get('status') or '').strip()
+    if row_status != PUBLISHED_STATUS:
+        excluded_urls.add(key)   # known but intentionally skipped
         continue
     inv_link = _normalize_estimate_url(row.get(ESTIMATE_LINK_COL, ''))
     if not inv_link:
@@ -155,12 +166,19 @@ for _, row in est_df.iterrows():
     inv_map[key] = inv_link
 
 matched_in_inventory = scan_df['_scenario_key'].isin(inv_map.keys())
+excluded_from_inventory = scan_df['_scenario_key'].isin(excluded_urls)
 
 # Within in-scope rows: apply criteria_passed -> comparison_status logic
 in_scope_no_criteria = in_scope & ~criteria_true
-in_scope_criteria_new = in_scope & criteria_true & ~matched_in_inventory
+# A scanned article is a new candidate only if it has an estimate link AND
+# is not already in the inventory (Published) AND is not explicitly excluded
+# (Skip or other non-Published status in estimate_scenarios.xlsx)
+in_scope_criteria_new = (
+    in_scope & criteria_true & ~matched_in_inventory & ~excluded_from_inventory
+)
 
 scan_df.loc[in_scope_no_criteria, STATUS_COL] = STATUS_NOT_APPLICABLE
+scan_df.loc[in_scope & criteria_true & excluded_from_inventory, STATUS_COL] = STATUS_NOT_APPLICABLE
 scan_df.loc[in_scope_criteria_new, STATUS_COL] = STATUS_NEW_CANDIDATE
 
 # Split matched existing scenario into SAME vs NEW estimate link (in-scope only)
@@ -174,10 +192,22 @@ for idx, row in scan_df.loc[applicable].iterrows():
     else:
         scan_df.at[idx, STATUS_COL] = STATUS_NEW_ESTIMATE
 
-# needs-review: in-scope rows only that require follow-up action
-needs_review = scan_df[
-    in_scope & scan_df[STATUS_COL].isin([STATUS_NEW_ESTIMATE, STATUS_NEW_CANDIDATE])
+# Action queues — both restricted to in-scope rows only.
+# Kept separate because they map to different workflows:
+#   estimate-updates  → existing inventory scenarios whose estimate link changed
+#                       (submit update request to calculator team + update reference file)
+#   new-candidates    → net-new articles not yet in the inventory
+#                       (evaluate and add to calculator if appropriate)
+estimate_updates = scan_df[
+    in_scope & (scan_df[STATUS_COL] == STATUS_NEW_ESTIMATE)
 ].copy()
+
+new_candidates = scan_df[
+    in_scope & (scan_df[STATUS_COL] == STATUS_NEW_CANDIDATE)
+].copy()
+
+# Combined count for summary (total rows requiring any action)
+needs_action_count = len(estimate_updates) + len(new_candidates)
 
 # --- Summary ---
 total = len(scan_df)
@@ -209,8 +239,10 @@ summary = pd.DataFrame({
         'new_estimate_candidate',
         'not_applicable (in-scope, no usable estimate)',
         '',
-        # Review queue
-        'Rows in needs-review tab',
+        # Action queues
+        'Rows in estimate-updates tab (matched_existing_scenario_new_estimate)',
+        'Rows in new-candidates tab (new_estimate_candidate)',
+        'Total rows requiring action',
         '',
         # Run metadata
         'Scan date (UTC)',
@@ -233,7 +265,9 @@ summary = pd.DataFrame({
         int((scan_df[STATUS_COL] == STATUS_NEW_CANDIDATE).sum()),
         int((in_scope & (scan_df[STATUS_COL] == STATUS_NOT_APPLICABLE)).sum()),
         '',
-        int(len(needs_review)),
+        int(len(estimate_updates)),
+        int(len(new_candidates)),
+        needs_action_count,
         '',
         datetime.utcnow().isoformat(),
         os.getenv('GITHUB_SHA', 'local'),
@@ -242,5 +276,6 @@ summary = pd.DataFrame({
 
 with pd.ExcelWriter(SCAN_RESULTS_PATH, engine='openpyxl', mode='w') as writer:
     scan_df.drop(columns=['_scenario_key']).to_excel(writer, sheet_name='scan-results', index=False)
-    needs_review.drop(columns=['_scenario_key'], errors='ignore').to_excel(writer, sheet_name='needs-review', index=False)
+    estimate_updates.drop(columns=['_scenario_key'], errors='ignore').to_excel(writer, sheet_name='estimate-updates', index=False)
+    new_candidates.drop(columns=['_scenario_key'], errors='ignore').to_excel(writer, sheet_name='new-candidates', index=False)
     summary.to_excel(writer, sheet_name='summary', index=False)
