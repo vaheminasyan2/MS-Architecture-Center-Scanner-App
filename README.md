@@ -4,7 +4,7 @@ A maintenance and discovery tool for keeping **[Azure Architecture Center](https
 
 It serves two purposes:
 
-1. **Maintenance of the 32 published calculator scenarios** — monitors each known scenario for estimate link changes, image updates, and whether the article is still live and accessible on the Architecture Center. Flags anything that requires a update request to the calculator team.
+1. **Maintenance of published calculator scenarios** — monitors each known scenario for estimate link changes, image updates, and whether the article is still live and accessible on the Architecture Center. Flags anything that requires a update request to the calculator team.
 
 2. **Discovery of new calculator candidates** — scans all Architecture Center articles to identify those that have added or updated a saved estimate link and are not yet in the calculator, so they can be evaluated for addition.
 
@@ -29,7 +29,7 @@ The scanner applies three gates in strict sequence. Each gate only runs if the p
 | Gate | Column | Question | Stops here if… |
 |---|---|---|---|
 | **1** | `scan_status` | Did the file parse and resolve correctly? | File is broken or missing — `scan_status` = error code |
-| **2** | `in_scope` | Is this a complete, valid scenario? | Any of the four scope criteria are missing — `in_scope = FALSE` |
+| **2** | `in_scope` | Is this a complete, valid scenario? | Any of the three scope criteria are missing — `in_scope = FALSE` |
 | **3** | `criteria_passed` | Does the article contain a usable pricing estimate link? | No valid estimate link found — `criteria_passed = FALSE` |
 
 Comparison (`comparison_status`) only runs on rows that reach and pass Gate 3.
@@ -48,14 +48,15 @@ Before any content evaluation, the scanner checks whether each file could actual
 
 ### Gate 2 — Scope filter (in / out of scope)
 
-Before any pass/fail evaluation runs, the scanner applies a scope filter. A scenario is **in scope (`in_scope = TRUE`)** only when **all four** of the following are present:
+Before any pass/fail evaluation runs, the scanner applies a scope filter. A scenario is **in scope (`in_scope = TRUE`)** only when **all three** of the following are present:
 
 1. **Non-blank title** — pulled from the YML metadata or MD front matter
 2. **Non-blank description** — same source
-3. **At least one Azure category** — `azureCategories` must have at least one entry
-4. **At least one architecture image** — at least one image reference (`:::image`, `![]()`, `<img>`, etc.) must appear anywhere in the article body, in any format and whether local or externally hosted
+3. **At least one architecture image** — at least one image reference (`:::image`, `![]()`, `<img>`, etc.) must appear anywhere in the article body, in any format and whether local or externally hosted
 
-Scenarios that fail one or more criteria receive `in_scope = FALSE` and an `out_of_scope_reason` that lists each failing criterion (semicolon-separated). **All rows are preserved in the output** — out-of-scope rows are visible in `scan-results` for auditability but are excluded from pass/fail evaluation, comparison, and the action queue tabs.
+`azureCategories` is captured in the output for every scenario but a missing or blank category does **not** cause a scenario to be marked out of scope.
+
+Scenarios that fail one or more criteria receive `in_scope = FALSE` and an `out_of_scope_reason` listing each failing criterion (semicolon-separated): `blank_title`, `blank_description`, or `no_architecture_image`. **All rows are preserved in the output** — out-of-scope rows are visible in `scan-results` for auditability but are excluded from pass/fail evaluation, comparison, and the action queue tabs.
 
 ### Gate 3 — Primary question (pass / fail)
 
@@ -100,7 +101,8 @@ This comparison answers the question: **Is this scenario already associated with
 | comparison_status value | Meaning | Action queue |
 |---|---|---|
 | `matched_existing_scenario_same_estimate` | Scenario exists in inventory and the scanned estimate link matches | No action needed |
-| `matched_existing_scenario_new_estimate` | Scenario exists in inventory but the estimate link has changed | **`estimate-updates`** tab |
+| `matched_existing_scenario_new_estimate` | Scenario exists in inventory but the estimate link has changed to a different URL | **`estimate-updates`** tab |
+| `estimate_link_removed` | Scenario exists in inventory, article is still live and in scope, but the estimate link has been removed from the article entirely | **`estimate-link-removed`** tab |
 | `new_estimate_candidate` | Scenario has a valid estimate link but does not exist in the inventory | **`new-candidates`** tab |
 | `not_applicable` | Scenario failed Gate 2 or Gate 3; comparison not performed | — |
 
@@ -110,7 +112,9 @@ Only scenarios with `in_scope = TRUE` and `criteria_passed = TRUE` participate i
 
 The Excel output includes two dedicated action queue worksheets that separate the two distinct follow-up workflows:
 
-**`estimate-updates`** — scenarios already in the Pricing Calculator (`matched_existing_scenario_new_estimate`) whose estimate link has changed in the Architecture Center. Each row requires submitting an update request to the calculator team and updating `estimate_scenarios.xlsx`.
+**`estimate-updates`** — scenarios already in the Pricing Calculator (`matched_existing_scenario_new_estimate`) whose estimate link has changed to a different URL. Each row requires submitting an update request to the calculator team and updating `estimate_scenarios.xlsx`.
+
+**`estimate-link-removed`** — scenarios already in the Pricing Calculator (`estimate_link_removed`) whose estimate link has been removed from the Architecture Center article entirely while the page is still live. Each row requires submitting a retirement request to the calculator team and updating `estimate_scenarios.xlsx`.
 
 **`new-candidates`** — articles not yet in the Pricing Calculator (`new_estimate_candidate`) that now have a valid saved estimate link. Each row is a candidate for evaluation and potential addition to the calculator.
 
@@ -284,6 +288,7 @@ After a successful run, download `scan-results.xlsx` from the workflow artifacts
 - Treat `scan_status = ok` + `in_scope = FALSE` rows as **out-of-scope scenarios** that need content work (missing title, description, category, or architecture image) before they can be considered for pricing readiness.
 - Treat `in_scope = TRUE` + `criteria_passed = FALSE` as **pricing gaps**, where a usable estimate link needs to be added to the Architecture Center article.
 - Use the **`estimate-updates`** tab to action estimate link changes on scenarios already in the Pricing Calculator. Each row requires submitting an update request to the calculator team and then updating `estimate_scenarios.xlsx` with the new estimate link.
+- Use the **`estimate-link-removed`** tab to action estimate link removals. Each row means the Architecture Center article is still live but its estimate link has been removed — submit a retirement request to the calculator team and update `estimate_scenarios.xlsx` accordingly.
 - Use the **`new-candidates`** tab to discover Architecture Center articles that now have a valid saved estimate link and are not yet in the calculator. Evaluate each row and add to the calculator if appropriate.
 - Use the **`inventory-health`** tab for availability monitoring of the 32 published calculator scenarios. `scenario_removed` and `scenario_redirected` rows mean the Architecture Center page has been taken down or moved — submit a retirement or redirect update to the calculator team.
 - Use the **`image-changes`** tab to track architecture diagram updates for the 32 published scenarios. `changed` rows mean the primary diagram was updated in the repo since the last confirmed baseline. After submitting the image update to the calculator team, trigger the **Update Image Baseline** workflow to reset the baseline. `image_not_found` rows mean the tracked image path in `estimate_scenarios.xlsx` is no longer valid and needs to be corrected.
